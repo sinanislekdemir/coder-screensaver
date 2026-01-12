@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "coder-screensaver"
-version = "0.1.1"
+version = "0.1.2"
 description = "Animated code screensaver with syntax highlighting - displays source code as if being typed in real-time"
 readme = "README.md"
 authors = [

@@ -5,6 +5,7 @@ import random
 import curses
 import re
 import argparse
+import threading
 from pathlib import Path
 
 from pygments import highlight
@@ -18,6 +19,8 @@ PAUSE_BETWEEN_FILES = 1.0
 STYLE_NAME = "monokai"
 WIND_EFFECT_MIN = 30
 WIND_EFFECT_MAX = 90
+
+render_lock = threading.Lock()
 
 EXTENSIONS = {
     ".py",
@@ -94,11 +97,12 @@ def strip_ansi_and_parse(text):
     pos = 0
 
     for match in ansi_pattern.finditer(text):
-        result.extend([(ch, current_color) for ch in text[pos : match.start()]])
+        chunk = text[pos : match.start()]
+        result.extend([(ch, current_color) for ch in chunk])
 
-        color_match = re.match(r"\x1b\[([0-9;]+)m", match.group())
-        if color_match:
-            codes = color_match.group(1).split(";")
+        codes_str = match.group()[2:-1]
+        if codes_str:
+            codes = codes_str.split(";")
 
             if len(codes) >= 3 and codes[0] == "38" and codes[1] == "5":
                 try:
@@ -106,16 +110,19 @@ def strip_ansi_and_parse(text):
                     cache_key = f"256_{color_code}"
                     if cache_key not in ansi_color_map:
                         pair_num = len(ansi_color_map) + 10
-                        if pair_num < 64:
+                        if pair_num < curses.COLORS:
                             curses_color = parse_ansi_code(color_code)
-                            curses.init_pair(pair_num, curses_color, curses.COLOR_BLACK)
-                            ansi_color_map[cache_key] = pair_num
+                            try:
+                                curses.init_pair(pair_num, curses_color, curses.COLOR_BLACK)
+                                ansi_color_map[cache_key] = pair_num
+                            except curses.error:
+                                pass
 
                     if cache_key in ansi_color_map:
                         current_color = curses.color_pair(ansi_color_map[cache_key])
                 except (ValueError, KeyError):
                     pass
-            elif codes == ["0"] or codes == ["00"]:
+            elif codes == ["0"] or codes == ["00"] or codes == [""]:
                 current_color = curses.color_pair(COLOR_NORMAL)
 
         pos = match.end()
@@ -173,14 +180,16 @@ def type_file(stdscr, path: Path):
 
         chars_since_refresh += 1
 
-        height, width = stdscr.getmaxyx()
+        with render_lock:
+            height, width = stdscr.getmaxyx()
         content_height = height - 2
 
         lines_typed = current_line + 1
         scroll_offset = max(0, lines_typed - content_height)
 
         if chars_since_refresh >= 100:
-            stdscr.clear()
+            with render_lock:
+                stdscr.clear()
             chars_since_refresh = 0
 
         render_screen(
@@ -192,7 +201,8 @@ def type_file(stdscr, path: Path):
         else:
             time.sleep((DELAY_MS / 1000) * random.uniform(0.7, 1.3))
 
-    height, width = stdscr.getmaxyx()
+    with render_lock:
+        height, width = stdscr.getmaxyx()
     content_height = height - 2
     lines_typed = len(lines)
     scroll_offset = max(0, lines_typed - content_height)
@@ -201,79 +211,80 @@ def type_file(stdscr, path: Path):
 
 
 def render_screen(stdscr, lines, cursor_line, cursor_col, scroll_offset):
-    try:
-        height, width = stdscr.getmaxyx()
-    except curses.error:
-        return
-
-    content_height = height - 2
-    total_lines = len(lines)
-
-    if scroll_offset > 0:
-        if cursor_line >= scroll_offset + content_height:
-            scroll_offset = cursor_line - content_height + 1
-        elif cursor_line < scroll_offset:
-            scroll_offset = cursor_line
-
-        max_scroll = max(0, total_lines - content_height)
-        scroll_offset = min(scroll_offset, max_scroll)
-
-    stdscr.erase()
-
-    menu_text = (
-        " File  Edit  Options  Buffers  Tools  Lisp-Interaction  Projectile  Help"
-    )
-    try:
-        stdscr.attron(curses.color_pair(COLOR_FRAME))
-        stdscr.addstr(0, 0, menu_text[:width].ljust(width))
-        stdscr.attroff(curses.color_pair(COLOR_FRAME))
-    except curses.error:
-        pass
-
-    for i in range(content_height):
-        line_idx = scroll_offset + i
-        if line_idx >= len(lines):
-            break
-
-        y = i + 1
-        x = 0
-
-        for j in range(min(len(lines[line_idx]), width)):
-            ch, color = lines[line_idx][j]
-            try:
-                stdscr.addstr(y, x, ch, color)
-                x += 1
-            except curses.error:
-                pass
-
-    cursor_screen_y = (cursor_line - scroll_offset) + 1
-    if 0 < cursor_screen_y < height - 1 and cursor_col < width:
+    with render_lock:
         try:
-            stdscr.addstr(cursor_screen_y, cursor_col, "█", curses.color_pair(COLOR_FRAME))
+            height, width = stdscr.getmaxyx()
+        except curses.error:
+            return
+
+        content_height = height - 2
+        total_lines = len(lines)
+
+        if scroll_offset > 0:
+            if cursor_line >= scroll_offset + content_height:
+                scroll_offset = cursor_line - content_height + 1
+            elif cursor_line < scroll_offset:
+                scroll_offset = cursor_line
+
+            max_scroll = max(0, total_lines - content_height)
+            scroll_offset = min(scroll_offset, max_scroll)
+
+        stdscr.erase()
+
+        menu_text = (
+            " File  Edit  Options  Buffers  Tools  Lisp-Interaction  Projectile  Help"
+        )
+        try:
+            stdscr.attron(curses.color_pair(COLOR_FRAME))
+            stdscr.addstr(0, 0, menu_text[:width].ljust(width))
+            stdscr.attroff(curses.color_pair(COLOR_FRAME))
         except curses.error:
             pass
 
-    status_y = height - 1
-    filename = Path(current_file).name if current_file else "untitled"
+        for i in range(content_height):
+            line_idx = scroll_offset + i
+            if line_idx >= len(lines):
+                break
 
-    if filename.endswith((".cpp", ".hpp", ".c", ".h")):
-        mode = "C++"
-    elif filename.endswith(".py"):
-        mode = "Python"
-    else:
-        mode = "Text"
+            y = i + 1
+            x = 0
 
-    status_text = f"-UUU:----F1  {filename}   ({mode})"
+            for j in range(min(len(lines[line_idx]), width)):
+                ch, color = lines[line_idx][j]
+                try:
+                    stdscr.addstr(y, x, ch, color)
+                    x += 1
+                except curses.error:
+                    pass
 
-    try:
-        stdscr.attron(curses.color_pair(COLOR_FRAME))
-        stdscr.addstr(status_y, 0, status_text[: width - 1].ljust(width - 1))
-        stdscr.attroff(curses.color_pair(COLOR_FRAME))
-    except curses.error:
-        pass
+        cursor_screen_y = (cursor_line - scroll_offset) + 1
+        if 0 < cursor_screen_y < height - 1 and cursor_col < width:
+            try:
+                stdscr.addstr(cursor_screen_y, cursor_col, "█", curses.color_pair(COLOR_FRAME))
+            except curses.error:
+                pass
 
-    stdscr.noutrefresh()
-    curses.doupdate()
+        status_y = height - 1
+        filename = Path(current_file).name if current_file else "untitled"
+
+        if filename.endswith((".cpp", ".hpp", ".c", ".h")):
+            mode = "C++"
+        elif filename.endswith(".py"):
+            mode = "Python"
+        else:
+            mode = "Text"
+
+        status_text = f"-UUU:----F1  {filename}   ({mode})"
+
+        try:
+            stdscr.attron(curses.color_pair(COLOR_FRAME))
+            stdscr.addstr(status_y, 0, status_text[: width - 1].ljust(width - 1))
+            stdscr.attroff(curses.color_pair(COLOR_FRAME))
+        except curses.error:
+            pass
+
+        stdscr.noutrefresh()
+        curses.doupdate()
 
 
 def wind_effect(stdscr, lines):
@@ -281,7 +292,8 @@ def wind_effect(stdscr, lines):
     if not lines:
         return
     
-    height, width = stdscr.getmaxyx()
+    with render_lock:
+        height, width = stdscr.getmaxyx()
     content_height = height - 2
     
     chars = []
@@ -302,48 +314,51 @@ def wind_effect(stdscr, lines):
     
     max_steps = (content_height + 10) * 10
     for step in range(max_steps):
-        try:
-            stdscr.clear()
-            
-            menu_text = "File  Edit  Options  Buffers  Tools  Lisp-Interaction  Projectile  Help"
+        with render_lock:
             try:
-                stdscr.attron(curses.color_pair(COLOR_FRAME))
-                stdscr.addstr(0, 0, menu_text[:width].ljust(width))
-                stdscr.attroff(curses.color_pair(COLOR_FRAME))
+                stdscr.clear()
+                
+                menu_text = "File  Edit  Options  Buffers  Tools  Lisp-Interaction  Projectile  Help"
+                try:
+                    stdscr.attron(curses.color_pair(COLOR_FRAME))
+                    stdscr.addstr(0, 0, menu_text[:width].ljust(width))
+                    stdscr.attroff(curses.color_pair(COLOR_FRAME))
+                except curses.error:
+                    pass
+                
+                for char_data in chars:
+                    char_data['x'] += char_data['vx'] * 0.1
+                    char_data['y'] += char_data['vy'] * 0.1
+                    char_data['vy'] += 0.01
+                    
+                    y = int(char_data['y'])
+                    x = int(char_data['x'])
+                    
+                    if 0 < y < height - 1 and 0 <= x < width:
+                        try:
+                            stdscr.addstr(y, x, char_data['ch'], char_data['color'])
+                        except curses.error:
+                            pass
+                
+                status_y = height - 1
+                status_text = f"-UUU:----F1  Clearing...   ({len([c for c in chars if 0 < c['y'] < height])} chars)"
+                try:
+                    stdscr.attron(curses.color_pair(COLOR_FRAME))
+                    stdscr.addstr(status_y, 0, status_text[: width - 1].ljust(width - 1))
+                    stdscr.attroff(curses.color_pair(COLOR_FRAME))
+                except curses.error:
+                    pass
+                
+                stdscr.refresh()
+                
             except curses.error:
                 pass
-            
-            for char_data in chars:
-                char_data['x'] += char_data['vx'] * 0.1
-                char_data['y'] += char_data['vy'] * 0.1
-                char_data['vy'] += 0.01
-                
-                y = int(char_data['y'])
-                x = int(char_data['x'])
-                
-                if 0 < y < height - 1 and 0 <= x < width:
-                    try:
-                        stdscr.addstr(y, x, char_data['ch'], char_data['color'])
-                    except curses.error:
-                        pass
-            
-            status_y = height - 1
-            status_text = f"-UUU:----F1  Clearing...   ({len([c for c in chars if 0 < c['y'] < height])} chars)"
-            try:
-                stdscr.attron(curses.color_pair(COLOR_FRAME))
-                stdscr.addstr(status_y, 0, status_text[: width - 1].ljust(width - 1))
-                stdscr.attroff(curses.color_pair(COLOR_FRAME))
-            except curses.error:
-                pass
-            
-            stdscr.refresh()
-            time.sleep(0.05)
-            
-        except curses.error:
-            pass
+        
+        time.sleep(0.05)
     
-    stdscr.clear()
-    stdscr.refresh()
+    with render_lock:
+        stdscr.clear()
+        stdscr.refresh()
 
 
 def typer_loop(stdscr):
@@ -387,8 +402,9 @@ def main(stdscr):
                 running = False
                 break
             elif key == curses.KEY_RESIZE:
-                stdscr.clear()
-                stdscr.refresh()
+                with render_lock:
+                    stdscr.clear()
+                    stdscr.refresh()
         except curses.error:
             pass
         time.sleep(0.1)
