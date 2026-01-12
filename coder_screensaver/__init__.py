@@ -16,6 +16,8 @@ SOURCE_PATH = Path(".")
 DELAY_MS = 35
 PAUSE_BETWEEN_FILES = 1.0
 STYLE_NAME = "monokai"
+WIND_EFFECT_MIN = 30
+WIND_EFFECT_MAX = 90
 
 EXTENSIONS = {
     ".py",
@@ -85,7 +87,7 @@ def parse_ansi_code(code):
 def strip_ansi_and_parse(text):
     global ansi_color_map
 
-    ansi_pattern = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
+    ansi_pattern = re.compile(r"\x1b\[[0-9;]*m")
 
     result = []
     current_color = curses.color_pair(COLOR_NORMAL)
@@ -113,6 +115,8 @@ def strip_ansi_and_parse(text):
                         current_color = curses.color_pair(ansi_color_map[cache_key])
                 except (ValueError, KeyError):
                     pass
+            elif codes == ["0"] or codes == ["00"]:
+                current_color = curses.color_pair(COLOR_NORMAL)
 
         pos = match.end()
 
@@ -133,6 +137,8 @@ def type_file(stdscr, path: Path):
     global current_file, running
 
     current_file = str(path)
+    
+    next_wind_time = time.time() + random.uniform(WIND_EFFECT_MIN, WIND_EFFECT_MAX)
 
     try:
         code = path.read_text(errors="ignore")
@@ -151,6 +157,10 @@ def type_file(stdscr, path: Path):
 
     for ch, color in parsed:
         if not running:
+            return
+        
+        if time.time() >= next_wind_time:
+            wind_effect(stdscr, lines)
             return
 
         if ch == "\n":
@@ -236,11 +246,12 @@ def render_screen(stdscr, lines, cursor_line, cursor_col, scroll_offset):
             except curses.error:
                 pass
 
-        if line_idx == cursor_line and x < width:
-            try:
-                stdscr.addstr(y, x, "█", curses.color_pair(COLOR_FRAME))
-            except curses.error:
-                pass
+    cursor_screen_y = (cursor_line - scroll_offset) + 1
+    if 0 < cursor_screen_y < height - 1 and cursor_col < width:
+        try:
+            stdscr.addstr(cursor_screen_y, cursor_col, "█", curses.color_pair(COLOR_FRAME))
+        except curses.error:
+            pass
 
     status_y = height - 1
     filename = Path(current_file).name if current_file else "untitled"
@@ -265,6 +276,76 @@ def render_screen(stdscr, lines, cursor_line, cursor_col, scroll_offset):
     curses.doupdate()
 
 
+def wind_effect(stdscr, lines):
+    """Make all characters drop off the screen with wind effect"""
+    if not lines:
+        return
+    
+    height, width = stdscr.getmaxyx()
+    content_height = height - 2
+    
+    chars = []
+    for y_idx, line in enumerate(lines):
+        if y_idx >= content_height:
+            break
+        for x_idx, (ch, color) in enumerate(line):
+            if x_idx >= width:
+                break
+            chars.append({
+                'ch': ch,
+                'color': color,
+                'x': x_idx,
+                'y': y_idx + 1,
+                'vx': random.uniform(-1, 1),
+                'vy': random.uniform(0.5, 2),
+            })
+    
+    max_steps = (content_height + 10) * 10
+    for step in range(max_steps):
+        try:
+            stdscr.clear()
+            
+            menu_text = "File  Edit  Options  Buffers  Tools  Lisp-Interaction  Projectile  Help"
+            try:
+                stdscr.attron(curses.color_pair(COLOR_FRAME))
+                stdscr.addstr(0, 0, menu_text[:width].ljust(width))
+                stdscr.attroff(curses.color_pair(COLOR_FRAME))
+            except curses.error:
+                pass
+            
+            for char_data in chars:
+                char_data['x'] += char_data['vx'] * 0.1
+                char_data['y'] += char_data['vy'] * 0.1
+                char_data['vy'] += 0.01
+                
+                y = int(char_data['y'])
+                x = int(char_data['x'])
+                
+                if 0 < y < height - 1 and 0 <= x < width:
+                    try:
+                        stdscr.addstr(y, x, char_data['ch'], char_data['color'])
+                    except curses.error:
+                        pass
+            
+            status_y = height - 1
+            status_text = f"-UUU:----F1  Clearing...   ({len([c for c in chars if 0 < c['y'] < height])} chars)"
+            try:
+                stdscr.attron(curses.color_pair(COLOR_FRAME))
+                stdscr.addstr(status_y, 0, status_text[: width - 1].ljust(width - 1))
+                stdscr.attroff(curses.color_pair(COLOR_FRAME))
+            except curses.error:
+                pass
+            
+            stdscr.refresh()
+            time.sleep(0.05)
+            
+        except curses.error:
+            pass
+    
+    stdscr.clear()
+    stdscr.refresh()
+
+
 def typer_loop(stdscr):
     global running
     files = load_source_files()
@@ -272,6 +353,7 @@ def typer_loop(stdscr):
         return
 
     while running:
+        random.shuffle(files)
         for f in files:
             if not running:
                 return
