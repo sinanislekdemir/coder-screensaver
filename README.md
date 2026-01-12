@@ -114,6 +114,8 @@ Some popular Pygments styles:
 Watch code being typed in real-time with syntax highlighting in your terminal!
 
 ### Screenshot
+<img width="1411" height="708" alt="image" src="https://github.com/user-attachments/assets/311efe86-6f25-4602-b5c1-907452b53cac" />
+
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
