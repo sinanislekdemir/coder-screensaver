@@ -16,7 +16,7 @@ from pygments.formatters import Terminal256Formatter
 SOURCE_PATH = Path(".")
 DELAY_MS = 35
 PAUSE_BETWEEN_FILES = 1.0
-STYLE_NAME = "monokai"
+STYLE_NAME = None
 WIND_EFFECT_MIN = 30
 WIND_EFFECT_MAX = 90
 
@@ -42,6 +42,7 @@ COLOR_FRAME_BG = curses.COLOR_BLUE
 
 running = True
 current_file = ""
+current_style = "monokai"
 ansi_color_map = {}
 
 
@@ -50,7 +51,8 @@ def get_theme_colors():
     from pygments.token import Keyword
 
     try:
-        style = get_style_by_name(STYLE_NAME)
+        style_name = STYLE_NAME if STYLE_NAME else current_style
+        style = get_style_by_name(style_name)
         keyword_style = style.style_for_token(Keyword)
         fg_hex = keyword_style.get("color", None)
         bg_hex = style.background_color
@@ -81,54 +83,49 @@ def hex_to_ansi256(hex_color):
         return 15
 
 
-def parse_ansi_code(code):
-    if code < curses.COLORS:
-        return code
-    return curses.COLOR_WHITE
+
 
 
 def strip_ansi_and_parse(text):
     global ansi_color_map
-
-    ansi_pattern = re.compile(r"\x1b\[[0-9;]*m")
-
+    
+    ansi_pattern = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]')
     result = []
     current_color = curses.color_pair(COLOR_NORMAL)
     pos = 0
 
     for match in ansi_pattern.finditer(text):
-        chunk = text[pos : match.start()]
-        result.extend([(ch, current_color) for ch in chunk])
-
-        codes_str = match.group()[2:-1]
-        if codes_str:
-            codes = codes_str.split(";")
-
-            if len(codes) >= 3 and codes[0] == "38" and codes[1] == "5":
+        result.extend([(ch, current_color) for ch in text[pos:match.start()]])
+        
+        escape_seq = match.group()
+        codes_str = escape_seq[2:-1]
+        
+        if not codes_str or codes_str in ('0', '00'):
+            current_color = curses.color_pair(COLOR_NORMAL)
+        else:
+            parts = codes_str.split(';')
+            if len(parts) >= 3 and parts[0] == '38' and parts[1] == '5':
                 try:
-                    color_code = int(codes[2])
-                    cache_key = f"256_{color_code}"
+                    color_code = int(parts[2])
+                    cache_key = f"c{color_code}"
+                    
                     if cache_key not in ansi_color_map:
                         pair_num = len(ansi_color_map) + 10
-                        if pair_num < curses.COLORS:
-                            curses_color = parse_ansi_code(color_code)
+                        if pair_num < curses.COLOR_PAIRS - 1 and color_code < curses.COLORS:
                             try:
-                                curses.init_pair(pair_num, curses_color, curses.COLOR_BLACK)
+                                curses.init_pair(pair_num, color_code, curses.COLOR_BLACK)
                                 ansi_color_map[cache_key] = pair_num
                             except curses.error:
                                 pass
-
+                    
                     if cache_key in ansi_color_map:
                         current_color = curses.color_pair(ansi_color_map[cache_key])
-                except (ValueError, KeyError):
+                except (ValueError, IndexError):
                     pass
-            elif codes == ["0"] or codes == ["00"] or codes == [""]:
-                current_color = curses.color_pair(COLOR_NORMAL)
-
+        
         pos = match.end()
-
+    
     result.extend([(ch, current_color) for ch in text[pos:]])
-
     return result
 
 
@@ -140,10 +137,27 @@ def load_source_files():
     return files
 
 
+def get_random_style():
+    from pygments.styles import get_all_styles
+    styles = list(get_all_styles())
+    return random.choice(styles) if styles else 'monokai'
+
+
 def type_file(stdscr, path: Path):
-    global current_file, running
+    global current_file, running, current_style, ansi_color_map
 
     current_file = str(path)
+    
+    if STYLE_NAME is None:
+        current_style = get_random_style()
+        ansi_color_map = {}
+        fg, bg = get_theme_colors()
+        try:
+            curses.init_pair(COLOR_FRAME, fg, bg)
+        except curses.error:
+            pass
+    else:
+        current_style = STYLE_NAME
     
     next_wind_time = time.time() + random.uniform(WIND_EFFECT_MIN, WIND_EFFECT_MAX)
 
@@ -153,7 +167,7 @@ def type_file(stdscr, path: Path):
     except Exception:
         return
 
-    formatter = Terminal256Formatter(style=STYLE_NAME)
+    formatter = Terminal256Formatter(style=current_style)
     highlighted = highlight(code, lexer, formatter)
     parsed = strip_ansi_and_parse(highlighted)
 
@@ -251,6 +265,8 @@ def render_screen(stdscr, lines, cursor_line, cursor_col, scroll_offset):
 
             for j in range(min(len(lines[line_idx]), width)):
                 ch, color = lines[line_idx][j]
+                if ch == "█":
+                    continue
                 try:
                     stdscr.addstr(y, x, ch, color)
                     x += 1
@@ -288,7 +304,6 @@ def render_screen(stdscr, lines, cursor_line, cursor_col, scroll_offset):
 
 
 def wind_effect(stdscr, lines):
-    """Make all characters drop off the screen with wind effect"""
     if not lines:
         return
     
@@ -303,14 +318,15 @@ def wind_effect(stdscr, lines):
         for x_idx, (ch, color) in enumerate(line):
             if x_idx >= width:
                 break
-            chars.append({
-                'ch': ch,
-                'color': color,
-                'x': x_idx,
-                'y': y_idx + 1,
-                'vx': random.uniform(-1, 1),
-                'vy': random.uniform(0.5, 2),
-            })
+            if ch != "█":
+                chars.append({
+                    'ch': ch,
+                    'color': color,
+                    'x': x_idx,
+                    'y': y_idx + 1,
+                    'vx': random.uniform(-1, 1),
+                    'vy': random.uniform(0.5, 2),
+                })
     
     max_steps = (content_height + 10) * 10
     for step in range(max_steps):
@@ -340,8 +356,9 @@ def wind_effect(stdscr, lines):
                         except curses.error:
                             pass
                 
+                remaining_chars = len([c for c in chars if 0 < c['y'] < height])
                 status_y = height - 1
-                status_text = f"-UUU:----F1  Clearing...   ({len([c for c in chars if 0 < c['y'] < height])} chars)"
+                status_text = f"-UUU:----F1  Clearing...   ({remaining_chars} chars)"
                 try:
                     stdscr.attron(curses.color_pair(COLOR_FRAME))
                     stdscr.addstr(status_y, 0, status_text[: width - 1].ljust(width - 1))
@@ -355,10 +372,9 @@ def wind_effect(stdscr, lines):
                 pass
         
         time.sleep(0.05)
-    
-    with render_lock:
-        stdscr.clear()
-        stdscr.refresh()
+        
+        if len([c for c in chars if 0 < c['y'] < height]) == 0:
+            break
 
 
 def typer_loop(stdscr):
@@ -425,7 +441,7 @@ def main_wrapper():
         default=35,
         help="Delay in milliseconds between characters",
     )
-    parser.add_argument("-s", "--style", default="monokai", help="Pygments style name")
+    parser.add_argument("-s", "--style", default=None, help="Pygments style name (default: random)")
     parser.add_argument(
         "-p", "--pause", type=float, default=1.0, help="Pause in seconds between files"
     )
